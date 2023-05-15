@@ -1,0 +1,8 @@
+[package]
+name = "ios2exif"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+kamadak-exif = "0.5.5"
+text_io = "0.1.12"
