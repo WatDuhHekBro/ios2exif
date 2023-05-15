@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     env,
     fs::{self, File},
     io::BufReader,
@@ -16,7 +16,7 @@ fn main() {
     };
     let mut needs_confirmation = false;
     let mut must_exit = false;
-    let mut map = HashMap::<String, String>::new(); // HashMap<timestamp, path>, used to test for duplicate timestamps.
+    let mut map = BTreeMap::<String, String>::new(); // Map<timestamp, path>, used to test for duplicate timestamps.
 
     for file in files {
         // Ignore the file if it can't be read
@@ -107,7 +107,7 @@ fn main() {
             if let Some(extension) = extension {
                 fs::rename(
                     &path,
-                    format!("{timestamp}.{}", extension.to_string_lossy()),
+                    format!("{timestamp}.{}", extension.to_string_lossy().to_lowercase()),
                 )
             } else {
                 fs::rename(&path, &timestamp)
@@ -117,7 +117,7 @@ fn main() {
         if let Err(error) = result {
             eprintln!("Error: Renaming failed for \"{path}\" - {error}");
         } else {
-            println!("Renaming success for \"{path}\" to timestamp \"{timestamp}\"!");
+            println!("Renaming success for \"{path}\" to timestamp \"{timestamp}\".");
         }
     }
 }
