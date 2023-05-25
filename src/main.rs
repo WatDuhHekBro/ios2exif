@@ -63,7 +63,8 @@ fn main() {
             // Continue the loop to show all occurrences.
             if map.contains_key(&timestamp) {
                 eprintln!(
-                    "Error: The timestamp ({timestamp}) already exists in file: \"{path_str}\""
+                    "Error: Attempted to add \"{path_str}\"\n\t...but the timestamp ({timestamp}) already exists in file: \"{}\"",
+                    map[&timestamp]
                 );
                 must_exit = true;
             } else {
