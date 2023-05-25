@@ -8,6 +8,12 @@ use std::{
 
 // Maybe implement command line arguments that target specific files.
 fn main() {
+    println!(
+        "-=[ {} - v{} ]=-",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION")
+    );
+
     let Ok(current_directory) = env::current_dir() else {
         return eprintln!("The current working directory either doesn't exist or isn't accessible.");
     };
@@ -49,7 +55,7 @@ fn main() {
             // Do not use DateTime, as that's supposed to update if the image is modified (https://gitlab.gnome.org/GNOME/gimp/-/issues/8160).
             // Ignore if "ifd_num" isn't "primary", as that indicates that it's a thumbnail image, not a main image.
             let Some(datetime) = exif.get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY) else {
-                eprintln!("Warning: EXIF metadata is present but does not include DateTimeOriginal. Not renaming...");
+                eprintln!("Warning: EXIF metadata is present but does not include DateTimeOriginal for file \"{path_str}\". Not renaming...");
                 needs_confirmation = true;
                 continue;
             };
