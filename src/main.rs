@@ -3,7 +3,7 @@ use std::{
     env,
     fs::{self, File},
     io::BufReader,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::Command,
     str,
 };
@@ -13,7 +13,11 @@ use std::{
 // Example: "exiftool -DateTimeOriginal -s3 2023-05-25_19-47-30.heic" gives value "2023:05:25 19:47:30"
 // Example: "exiftool -CreationDate -s3 2023-05-14_21-34-06.mov" gives value "2023:05:14 21:34:06-05:00"
 // Example: "exiftool -CreateDate -s3 2023-05-14_21-34-06.mp4" gives value "2023:05:14 21:34:06" (timezone-unaware, manual checking required)
-// "for file in ./*; do echo $file; exiftool -CreateDate -s3 $file | tr ' ' _ | tr : -; echo; done" (plus manual checking for timezone)
+
+struct FileInfo {
+    path: String,
+    new_name: String,
+}
 
 // Maybe implement command line arguments that target specific files.
 fn main() {
@@ -34,7 +38,7 @@ fn main() {
     };
     let mut needs_confirmation = false;
     let mut must_exit = false;
-    let mut map = BTreeMap::<String, String>::new(); // Map<timestamp, path>, used to test for duplicate timestamps.
+    let mut map = BTreeMap::<String, FileInfo>::new(); // Map<timestamp, path>, used to test for duplicate timestamps.
 
     for file in files {
         // Ignore the file if it can't be read
@@ -62,7 +66,7 @@ fn main() {
 
         // Determine what to do based on the file extension
         let try_exif_first = match extension {
-            Some(extension) => match extension.as_str() {
+            Some(ref extension) => match extension.as_str() {
                 // Photos
                 "jpg" => true,
                 "jpeg" => true,
@@ -79,22 +83,29 @@ fn main() {
             _ => true,
         };
 
-        let timestamp = get_timestamp(&path, &path_str, try_exif_first);
-        let Some(timestamp) = timestamp else {
+        let result = get_timestamp_and_rename_pair(&path, &path_str, extension, try_exif_first);
+        let Some(result) = result else {
             needs_confirmation = true;
             continue;
         };
+        let (timestamp, new_name) = result;
 
         // Error if two files have the same timestamp, as that will definitely cause problems.
         // Continue the loop to show all occurrences.
         if map.contains_key(&timestamp) {
             eprintln!(
                     "Error: Attempted to add \"{path_str}\"\n\t...but the timestamp ({timestamp}) already exists in file: \"{}\"",
-                    map[&timestamp]
+                    map[&timestamp].path
                 );
             must_exit = true;
         } else {
-            map.insert(timestamp, path_str);
+            map.insert(
+                timestamp,
+                FileInfo {
+                    path: path_str,
+                    new_name,
+                },
+            );
         }
     }
 
@@ -126,42 +137,69 @@ fn main() {
     }
 
     // Once confirmed or no warnings, then proceed with the renaming.
-    for (timestamp, path) in map {
-        let extension = Path::new(&path).extension();
-
-        let result = {
-            if let Some(extension) = extension {
-                fs::rename(
-                    &path,
-                    format!("{timestamp}.{}", extension.to_string_lossy().to_lowercase()),
-                )
-            } else {
-                fs::rename(&path, &timestamp)
-            }
-        };
+    for (timestamp, info) in map {
+        let result = fs::rename(&info.path, &info.new_name);
 
         if let Err(error) = result {
-            eprintln!("Error: Renaming failed for \"{path}\" - {error}");
+            eprintln!("Error: Renaming failed for \"{}\" - {error}", info.path);
         } else {
-            println!("Renaming success for \"{path}\" to timestamp \"{timestamp}\".");
+            println!(
+                "Renaming success for \"{}\" to timestamp \"{timestamp}\".",
+                info.path
+            );
         }
     }
 }
 
 // Try exif first, otherwise use "exiftool" to read miscellaneous metadata (QuickTime, etc.)
-fn get_timestamp(path: &PathBuf, path_str: &String, try_exif_first: bool) -> Option<String> {
+// Returns a pair of (timestamp, new_name) if successful
+fn get_timestamp_and_rename_pair(
+    path: &PathBuf,
+    path_str: &String,
+    extension: Option<String>,
+    try_exif_first: bool,
+) -> Option<(String, String)> {
     if try_exif_first {
-        let timestamp = get_timestamp_from_exif(&path, &path_str);
+        let timestamp = get_timestamp_from_exif(path, path_str);
 
         match timestamp {
-            Ok(timestamp) => return Some(timestamp),
+            Ok(timestamp) => {
+                if let Some(extension) = extension {
+                    return Some((timestamp.clone(), format!("{timestamp}.{extension}")));
+                } else {
+                    return Some((timestamp.clone(), timestamp));
+                }
+            }
             Err(error_message) => {
                 eprintln!("{}", error_message);
             }
         }
     }
 
-    get_timestamp_from_exiftool(path_str)
+    // Try CreationDate
+    let timestamp = get_timestamp_from_exiftool_creationdate(path_str);
+
+    if let Some(timestamp) = timestamp {
+        if let Some(extension) = extension {
+            return Some((timestamp.clone(), format!("{timestamp}.{extension}")));
+        } else {
+            return Some((timestamp.clone(), timestamp));
+        }
+    };
+
+    // Try CreateDate with warning in filename
+    let timestamp = get_timestamp_from_exiftool_createdate(path_str);
+
+    if let Some(timestamp) = timestamp {
+        if let Some(extension) = extension {
+            return Some((timestamp.clone(), format!("{timestamp} (utc).{extension}",)));
+        } else {
+            return Some((timestamp.clone(), format!("{timestamp} (utc)")));
+        }
+    };
+
+    // Nothing found otherwise
+    None
 }
 
 // Returns a string of the formatted timestamp if successful
@@ -201,7 +239,7 @@ fn get_timestamp_from_exif(path: &PathBuf, path_str: &String) -> Result<String, 
 }
 
 // If it fails for whatever reason, just ignore the entry
-fn get_timestamp_from_exiftool(path_str: &String) -> Option<String> {
+fn get_timestamp_from_exiftool_creationdate(path_str: &String) -> Option<String> {
     // Format: "YYYY:MM:DD HH:MM:SS-ZZ:00"
     let output = Command::new("exiftool")
         .arg("-CreationDate")
@@ -232,6 +270,50 @@ fn get_timestamp_from_exiftool(path_str: &String) -> Option<String> {
     let Ok(timestamp) = timestamp else {
         eprintln!(
             "[exiftool] Warning: CreationDate \"{:?}\" should be a valid UTF-8 string on path \"{path_str}\"!",
+            slice
+        );
+        return None;
+    };
+
+    let mut timestamp = timestamp.to_string();
+    // Convert timestamp of format "YYYY:MM:DD HH:MM:SS" to "YYYY-MM-DD_HH-MM-SS"
+    timestamp = timestamp.replace(" ", "_");
+    timestamp = timestamp.replace(":", "-");
+
+    Some(timestamp)
+}
+
+// If it fails for whatever reason, just ignore the entry
+fn get_timestamp_from_exiftool_createdate(path_str: &String) -> Option<String> {
+    // Format: "YYYY:MM:DD HH:MM:SS"
+    let output = Command::new("exiftool")
+        .arg("-CreateDate")
+        .arg("-s3")
+        .arg(path_str)
+        .output();
+
+    let Ok(output) = output else {
+        eprintln!(
+            "[exiftool] Warning: Failed to execute \"exiftool\" process on path \"{path_str}\"!"
+        );
+        return None;
+    };
+
+    let length = output.stdout.len();
+
+    // Output is empty if metadata attribute doesn't exist
+    if length <= 0 {
+        eprintln!("[exiftool] Warning: No output for tag \"CreateDate\" on path \"{path_str}\"!");
+        return None;
+    }
+
+    // -1 for ending newline
+    let slice = &output.stdout[0..length - 1];
+    let timestamp = str::from_utf8(slice);
+
+    let Ok(timestamp) = timestamp else {
+        eprintln!(
+            "[exiftool] Warning: CreateDate \"{:?}\" should be a valid UTF-8 string on path \"{path_str}\"!",
             slice
         );
         return None;
