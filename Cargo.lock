@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "ios2exif"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "kamadak-exif",
  "text_io",

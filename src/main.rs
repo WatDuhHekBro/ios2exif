@@ -8,11 +8,18 @@ use std::{
     str,
 };
 
+// General Rules of Thumb:
+// EXIF DateTimeOriginal = Photos taken via camera and modern screenshots (after 2020)
+// QuickTime CreationDate = Videos (MOV) taken via camera
+// QuickTime CreateDate = Screen Recordings (MOV/MP4)
+// XMP DateCreated = Older screenshots (before 2020)
+
 // "CreationDate" is actually QuickTime metadata, not EXIF metadata. (https://superuser.com/a/1285932)
 // "-s3" is to just get the value without the header. (https://photo.stackexchange.com/a/56678)
 // Example: "exiftool -DateTimeOriginal -s3 2023-05-25_19-47-30.heic" gives value "2023:05:25 19:47:30"
 // Example: "exiftool -CreationDate -s3 2023-05-14_21-34-06.mov" gives value "2023:05:14 21:34:06-05:00"
 // Example: "exiftool -CreateDate -s3 2023-05-14_21-34-06.mp4" gives value "2023:05:14 21:34:06" (timezone-unaware, manual checking required)
+// Example: "exiftool -DateCreated -s3 2019-10-15_02-08-00.png" gives value "2019:10:15 02:08:48"
 
 struct FileInfo {
     path: String,
@@ -198,6 +205,17 @@ fn get_timestamp_and_rename_pair(
         }
     };
 
+    // Try DateCreated
+    let timestamp = get_timestamp_from_exiftool_datecreated(path_str);
+
+    if let Some(timestamp) = timestamp {
+        if let Some(extension) = extension {
+            return Some((timestamp.clone(), format!("{timestamp}.{extension}")));
+        } else {
+            return Some((timestamp.clone(), timestamp));
+        }
+    };
+
     // Nothing found otherwise
     None
 }
@@ -314,6 +332,50 @@ fn get_timestamp_from_exiftool_createdate(path_str: &String) -> Option<String> {
     let Ok(timestamp) = timestamp else {
         eprintln!(
             "[exiftool] Warning: CreateDate \"{:?}\" should be a valid UTF-8 string on path \"{path_str}\"!",
+            slice
+        );
+        return None;
+    };
+
+    let mut timestamp = timestamp.to_string();
+    // Convert timestamp of format "YYYY:MM:DD HH:MM:SS" to "YYYY-MM-DD_HH-MM-SS"
+    timestamp = timestamp.replace(" ", "_");
+    timestamp = timestamp.replace(":", "-");
+
+    Some(timestamp)
+}
+
+// If it fails for whatever reason, just ignore the entry
+fn get_timestamp_from_exiftool_datecreated(path_str: &String) -> Option<String> {
+    // Format: "YYYY:MM:DD HH:MM:SS"
+    let output = Command::new("exiftool")
+        .arg("-DateCreated")
+        .arg("-s3")
+        .arg(path_str)
+        .output();
+
+    let Ok(output) = output else {
+        eprintln!(
+            "[exiftool] Warning: Failed to execute \"exiftool\" process on path \"{path_str}\"!"
+        );
+        return None;
+    };
+
+    let length = output.stdout.len();
+
+    // Output is empty if metadata attribute doesn't exist
+    if length <= 0 {
+        eprintln!("[exiftool] Warning: No output for tag \"DateCreated\" on path \"{path_str}\"!");
+        return None;
+    }
+
+    // -1 for ending newline
+    let slice = &output.stdout[0..length - 1];
+    let timestamp = str::from_utf8(slice);
+
+    let Ok(timestamp) = timestamp else {
+        eprintln!(
+            "[exiftool] Warning: DateCreated \"{:?}\" should be a valid UTF-8 string on path \"{path_str}\"!",
             slice
         );
         return None;
