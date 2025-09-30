@@ -21,9 +21,18 @@ use std::{
 // Example: "exiftool -CreateDate -s3 2023-05-14_21-34-06.mp4" gives value "2023:05:14 21:34:06" (timezone-unaware, manual checking required)
 // Example: "exiftool -DateCreated -s3 2019-10-15_02-08-00.png" gives value "2019:10:15 02:08:48"
 
+#[derive(PartialEq)]
+enum FileType {
+    Photo,
+    Video,
+    Neither,
+}
+
 struct FileInfo {
     path: String,
     new_name: String,
+    filename_without_extension: String,
+    file_type: FileType,
 }
 
 // Maybe implement command line arguments that target specific files.
@@ -65,6 +74,21 @@ fn main() {
                 None => None,
             }
         };
+        // Get the filename without the extension to compare live photos
+        let filename_without_extension = {
+            let filename = file.file_name().to_string_lossy().to_string();
+            if extension.is_some() {
+                let index = filename.rfind('.');
+
+                if let Some(index) = index {
+                    filename[..index].to_string()
+                } else {
+                    filename
+                }
+            } else {
+                filename
+            }
+        };
 
         // Ignore directories
         if path.is_dir() {
@@ -72,26 +96,33 @@ fn main() {
         }
 
         // Determine what to do based on the file extension
-        let try_exif_first = match extension {
+        let file_type = match extension {
             Some(ref extension) => match extension.as_str() {
                 // Photos
-                "jpg" => true,
-                "jpeg" => true,
-                "png" => true,
-                "heic" => true,
+                "jpg" => FileType::Photo,
+                "jpeg" => FileType::Photo,
+                "png" => FileType::Photo,
+                "heic" => FileType::Photo,
                 // Videos
-                "mov" => false,
-                "mp4" => false,
+                "mov" => FileType::Video,
+                "mp4" => FileType::Video,
                 _ => {
                     println!("Warning: Unsupported extension \".{extension}\", ignoring...");
                     continue;
                 }
             },
-            _ => true,
+            _ => FileType::Neither,
+        };
+
+        let try_exif_first = match file_type {
+            FileType::Photo => true,
+            FileType::Video => false,
+            FileType::Neither => true,
         };
 
         let result = get_timestamp_and_rename_pair(&path, &path_str, extension, try_exif_first);
         let Some(result) = result else {
+            eprintln!("Warning: Couldn't find any valid EXIF metadata for \"{path_str}\"!");
             needs_confirmation = true;
             continue;
         };
@@ -99,18 +130,45 @@ fn main() {
 
         // Error if two files have the same timestamp, as that will definitely cause problems.
         // Continue the loop to show all occurrences.
-        if map.contains_key(&timestamp) {
-            eprintln!(
+        let fileinfo = map.get(&timestamp);
+
+        if let Some(fileinfo) = fileinfo {
+            // NOTE: Live photos come with 2 files attached with the same timestamp, e.g. IMG_0369.HEIC and IMG_0369.MOV.
+            // Because the "timestamp" key isn't directly used in the map, just add a + at the end so the map can still function.
+            let has_matching_original_filenames =
+                fileinfo.filename_without_extension == filename_without_extension;
+            let is_video_pair_to_photo =
+                fileinfo.file_type == FileType::Photo && file_type == FileType::Video;
+            let is_photo_pair_to_video =
+                fileinfo.file_type == FileType::Video && file_type == FileType::Photo;
+            let is_live_photo_pair = has_matching_original_filenames
+                && (is_video_pair_to_photo || is_photo_pair_to_video);
+
+            if is_live_photo_pair {
+                map.insert(
+                    format!("{timestamp}+"),
+                    FileInfo {
+                        path: path_str,
+                        new_name,
+                        filename_without_extension,
+                        file_type,
+                    },
+                );
+            } else {
+                eprintln!(
                     "Error: Attempted to add \"{path_str}\"\n\t...but the timestamp ({timestamp}) already exists in file: \"{}\"",
                     map[&timestamp].path
                 );
-            must_exit = true;
+                must_exit = true;
+            }
         } else {
             map.insert(
                 timestamp,
                 FileInfo {
                     path: path_str,
                     new_name,
+                    filename_without_extension,
+                    file_type,
                 },
             );
         }
@@ -125,7 +183,7 @@ fn main() {
         use text_io::read;
 
         // Ask Y/y/N/n, exit otherwise.
-        print!("Are all the warnings are okay with you? [y/n] ");
+        print!("Are all the warnings are okay with you? [y/N] ");
         let response: String = read!();
 
         match response.as_str() {
@@ -177,8 +235,8 @@ fn get_timestamp_and_rename_pair(
                     return Some((timestamp.clone(), timestamp));
                 }
             }
-            Err(error_message) => {
-                eprintln!("{}", error_message);
+            Err(_error_message) => {
+                //eprintln!("{}", error_message);
             }
         }
     }
@@ -276,7 +334,7 @@ fn get_timestamp_from_exiftool_creationdate(path_str: &String) -> Option<String>
 
     // Output is empty if metadata attribute doesn't exist
     if length <= 0 {
-        eprintln!("[exiftool] Warning: No output for tag \"CreationDate\" on path \"{path_str}\"!");
+        //eprintln!("[exiftool] Warning: No output for tag \"CreationDate\" on path \"{path_str}\"!");
         return None;
     }
 
@@ -321,7 +379,7 @@ fn get_timestamp_from_exiftool_createdate(path_str: &String) -> Option<String> {
 
     // Output is empty if metadata attribute doesn't exist
     if length <= 0 {
-        eprintln!("[exiftool] Warning: No output for tag \"CreateDate\" on path \"{path_str}\"!");
+        //eprintln!("[exiftool] Warning: No output for tag \"CreateDate\" on path \"{path_str}\"!");
         return None;
     }
 
@@ -365,7 +423,7 @@ fn get_timestamp_from_exiftool_datecreated(path_str: &String) -> Option<String> 
 
     // Output is empty if metadata attribute doesn't exist
     if length <= 0 {
-        eprintln!("[exiftool] Warning: No output for tag \"DateCreated\" on path \"{path_str}\"!");
+        //eprintln!("[exiftool] Warning: No output for tag \"DateCreated\" on path \"{path_str}\"!");
         return None;
     }
 

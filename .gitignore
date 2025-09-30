@@ -1,4 +1,6 @@
 /target
+*.HEIC
+*.heic
 *.JPG
 *.jpg
 *.PNG
