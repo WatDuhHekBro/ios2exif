@@ -22,6 +22,7 @@ use std::{
 
 // Map<Intermediary Filename / "IMG_0420.heic", RenameData>
 // Note: The final filename is constructed dynamically via "timestamp + lowercase(extension)"
+#[derive(Debug)]
 struct RenameData {
     path: String,              // "/path/to/IMG_0420.HEIC", unmodified & case-sensitive
     timestamp: Option<String>, // "2025-01-01_04-20-00", empty until discovered
@@ -140,7 +141,7 @@ fn main() {
     }
 
     // Once confirmed or no warnings, then proceed with the renaming.
-    for (_, data) in &rename_map {
+    for (filename, data) in &rename_map {
         let RenameData {
             path,
             timestamp,
@@ -153,7 +154,7 @@ fn main() {
             if let Some(pointer) = pointer {
                 let target_file_pair = rename_map
                     .get(pointer)
-                    .expect("ERROR: File pairing failure!");
+                    .expect(&format!("ERROR: File pairing failure for \"{filename}\" via pointer \"{pointer}\" for map \"{rename_map:?}\"!"));
                 let Some(ref timestamp) = target_file_pair.timestamp else {
                     eprintln!("ERROR: Invalid timestamp unwrap when renaming in pointer!");
                     continue;
@@ -197,7 +198,6 @@ fn generate_rename_map(files: &Vec<DirEntry>) -> BTreeMap<String, RenameData> {
             continue;
         }
 
-        let filename = file.file_name().to_string_lossy().to_string();
         let base_name = path.file_stem();
         let extension = path.extension();
         let Some(base_name) = base_name else {
@@ -211,7 +211,7 @@ fn generate_rename_map(files: &Vec<DirEntry>) -> BTreeMap<String, RenameData> {
 
         filenames.push(format!("{base_name}.{extension}"));
         map.insert(
-            filename,
+            format!("{base_name}.{extension}"),
             RenameData {
                 path: path_str,
                 timestamp: None,
