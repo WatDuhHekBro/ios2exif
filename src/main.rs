@@ -1,6 +1,10 @@
-use multimap::MultiMap;
 use std::{
-    collections::BTreeMap, env, fs::{self, DirEntry, File}, io::BufReader, path::Path, process::Command, str
+    collections::BTreeMap,
+    env,
+    fs::{self, DirEntry, File},
+    io::BufReader,
+    process::Command,
+    str,
 };
 
 // General Rules of Thumb:
@@ -16,19 +20,14 @@ use std::{
 // Example: "exiftool -CreateDate -s3 2023-05-14_21-34-06.mp4" gives value "2023:05:14 21:34:06" (timezone-unaware, manual checking required)
 // Example: "exiftool -DateCreated -s3 2019-10-15_02-08-00.png" gives value "2019:10:15 02:08:48"
 
-#[derive(PartialEq)]
-enum FileType {
-    Photo,
-    Video,
-    Neither,
-}
-
-struct FileInfo {
-    // timestamp = "2025-01-01_04-20-00"
-    path: String,                       // "/path/to/image.HEIC"
-    new_name: String,                   // "2025-01-01_04-20-00.heic"
-    filename_without_extension: String, // "image"
-    file_type: FileType,
+// Map<Intermediary Filename / "IMG_0420.heic", RenameData>
+// Note: The final filename is constructed dynamically via "timestamp + lowercase(extension)"
+struct RenameData {
+    path: String,              // "/path/to/IMG_0420.HEIC", unmodified & case-sensitive
+    timestamp: Option<String>, // "2025-01-01_04-20-00", empty until discovered
+    pointer: Option<String>, // Some("IMG_0420.heic") -> Non-nested pointer used for MOVs with matching HEICs (live photos), retrieves timestamp
+    base_name: String,       // "IMG_0420"
+    extension: String,       // "heic", converted to lowercase
 }
 
 // Maybe implement command line arguments that target specific files.
@@ -50,10 +49,11 @@ fn main() {
     };
     let mut needs_confirmation = false;
     let mut must_exit = false;
-    let mut map = BTreeMap::<String, FileInfo>::new(); // Map<timestamp, path>, used to test for duplicate timestamps.
+    let mut timestamps = BTreeMap::<String, String>::new(); // Map<timestamp, path>, used to test for duplicate timestamps.
 
     let files = {
         let mut safe_files: Vec<DirEntry> = Vec::new();
+
         for file in files {
             // Ignore the file if it can't be read
             let Ok(file) = file else {
@@ -64,133 +64,52 @@ fn main() {
 
             safe_files.push(file);
         }
+
         safe_files
     };
 
-    //let live_photos_map = get_live_photos_map(&files);
-    let paired_map = get_paired_map(&files);
+    let mut rename_map = generate_rename_map(&files);
+    let mut entries_to_ignore: Vec<String> = vec![];
 
-    for (base_name, extensions) in paired_map {
-        if extensions.len() > 1 {
-            //
-        } else if extensions.len() == 1 {
-            //
-        }
-        for ext in extensions {
-            let path = Path::join(&current_directory, &base_name);
-        }
-    }
+    for (filename, data) in &mut rename_map {
+        let RenameData {
+            path,
+            timestamp: _,
+            base_name: _,
+            extension: _,
+            pointer,
+        } = data;
 
-    for file in &files {
-        let path = file.path();
-        let path_str = path.to_string_lossy().to_string();
-        // Get lowercase extension (if any)
-        let extension = {
-            let extension = path.extension();
-
-            match extension {
-                Some(extension) => Some(extension.to_string_lossy().to_lowercase()),
-                None => None,
-            }
-        };
-        // Get the filename without the extension to compare live photos
-        let filename_without_extension = {
-            let filename = file.file_name().to_string_lossy().to_string();
-            if extension.is_some() {
-                let index = filename.rfind('.');
-
-                if let Some(index) = index {
-                    filename[..index].to_string()
-                } else {
-                    filename
-                }
-            } else {
-                filename
-            }
-        };
-
-        // Ignore directories
-        if path.is_dir() {
+        // If it's a MOV file attached to a file pair, don't even consider its own timestamp.
+        if pointer.is_some() {
             continue;
         }
 
-        // Determine what to do based on the file extension
-        let file_type = match extension {
-            Some(ref extension) => match extension.as_str() {
-                // Photos
-                "jpg" => FileType::Photo,
-                "jpeg" => FileType::Photo,
-                "png" => FileType::Photo,
-                "heic" => FileType::Photo,
-                // Videos
-                "mov" => FileType::Video,
-                "mp4" => FileType::Video,
-                _ => {
-                    println!("Warning: Unsupported extension \".{extension}\", ignoring...");
-                    continue;
-                }
-            },
-            _ => FileType::Neither,
-        };
-
-        let try_exif_first = match file_type {
-            FileType::Photo => true,
-            FileType::Video => false,
-            FileType::Neither => true,
-        };
-
-        let result = get_timestamp_and_rename_pair(&path_str, extension, try_exif_first);
-        let Some(result) = result else {
-            eprintln!("Warning: Couldn't find any valid EXIF metadata for \"{path_str}\"!");
+        let timestamp = get_timestamp(&path);
+        let Some(timestamp) = timestamp else {
+            eprintln!("Warning: Couldn't find any valid EXIF metadata for \"{path}\"!");
             needs_confirmation = true;
+            entries_to_ignore.push(filename.clone());
             continue;
         };
-        let (timestamp, new_name) = result;
 
         // Error if two files have the same timestamp, as that will definitely cause problems.
         // Continue the loop to show all occurrences.
-        let fileinfo = map.get(&timestamp);
+        let existing_path_for_timestamp = timestamps.get(&timestamp);
 
-        if let Some(fileinfo) = fileinfo {
-            // NOTE: Live photos come with 2 files attached with the same timestamp, e.g. IMG_0369.HEIC and IMG_0369.MOV.
-            // Because the "timestamp" key isn't directly used in the map, just add a + at the end so the map can still function.
-            let has_matching_original_filenames =
-                fileinfo.filename_without_extension == filename_without_extension;
-            let is_video_pair_to_photo =
-                fileinfo.file_type == FileType::Photo && file_type == FileType::Video;
-            let is_photo_pair_to_video =
-                fileinfo.file_type == FileType::Video && file_type == FileType::Photo;
-            let is_live_photo_pair = has_matching_original_filenames
-                && (is_video_pair_to_photo || is_photo_pair_to_video);
-
-            if is_live_photo_pair {
-                map.insert(
-                    format!("{timestamp}+"),
-                    FileInfo {
-                        path: path_str,
-                        new_name,
-                        filename_without_extension,
-                        file_type,
-                    },
-                );
-            } else {
-                eprintln!(
-                    "Error: Attempted to add \"{path_str}\"\n\t...but the timestamp ({timestamp}) already exists in file: \"{}\"",
-                    map[&timestamp].path
-                );
-                must_exit = true;
-            }
-        } else {
-            map.insert(
-                timestamp,
-                FileInfo {
-                    path: path_str,
-                    new_name,
-                    filename_without_extension,
-                    file_type,
-                },
+        if let Some(existing_path_for_timestamp) = existing_path_for_timestamp {
+            eprintln!(
+                "Error: Attempted to add \"{path}\"\n\t...but the timestamp ({timestamp}) already exists in file: \"{existing_path_for_timestamp}\"",
             );
+            must_exit = true;
+        } else {
+            timestamps.insert(timestamp.clone(), path.to_string());
+            data.timestamp = Some(timestamp);
         }
+    }
+
+    for filename in entries_to_ignore {
+        rename_map.remove(&filename);
     }
 
     if must_exit {
@@ -221,35 +140,57 @@ fn main() {
     }
 
     // Once confirmed or no warnings, then proceed with the renaming.
-    for (timestamp, info) in map {
-        let result = fs::rename(&info.path, &info.new_name);
+    for (_, data) in &rename_map {
+        let RenameData {
+            path,
+            timestamp,
+            pointer,
+            base_name: _,
+            extension,
+        } = data;
+
+        let new_name: String = {
+            if let Some(pointer) = pointer {
+                let target_file_pair = rename_map
+                    .get(pointer)
+                    .expect("ERROR: File pairing failure!");
+                let Some(ref timestamp) = target_file_pair.timestamp else {
+                    eprintln!("ERROR: Invalid timestamp unwrap when renaming in pointer!");
+                    continue;
+                };
+                format!("{timestamp}.{extension}")
+            } else {
+                let Some(timestamp) = timestamp else {
+                    eprintln!("ERROR: Invalid timestamp unwrap when renaming!");
+                    continue;
+                };
+                format!("{timestamp}.{extension}")
+            }
+        };
+
+        let result = fs::rename(path, &new_name);
 
         if let Err(error) = result {
-            eprintln!("Error: Renaming failed for \"{}\" - {error}", info.path);
+            eprintln!("Error: Renaming failed for \"{path}\" - {error}");
         } else {
-            println!(
-                "Renaming success for \"{}\" to timestamp \"{timestamp}\".",
-                info.path
-            );
+            println!("Renaming success for \"{path}\" to timestamp \"{new_name}\".");
         }
     }
 }
 
-// Map<"IMG_0420", true>, keeps track of live photo file pairs.
+// Rationale:
 // -----
 // Live photos are stored via "IMG_0420.HEIC" + "IMG_0420.MOV" file pairs.
 // The Photos app always shows the timestamp of the HEIC file, but the two timestamps might not always align.
 // Rather than having to manually correct the MOV timestamp for each file, get it right the first time.
 // This is useful because reimporting the files into an app like HashPhotos requires the same filenames with different extensions for live photos to function properly.
-// -----
-// This map will be used in place of iterating over the "files" variable, as it'll already have grouped paired files.
-fn get_paired_map(files: &Vec<DirEntry>) -> MultiMap<String, String> {
-    //fn get_live_photos_map(files: &Vec<DirEntry>) -> BTreeMap<String, bool> {
-    //let mut live_photos_map = BTreeMap::<String, bool>::new();
-    let mut paired_map = MultiMap::<String, String>::new(); // Map<OrigFilename, Extension(s)>
+fn generate_rename_map(files: &Vec<DirEntry>) -> BTreeMap<String, RenameData> {
+    let mut map = BTreeMap::<String, RenameData>::new();
+    let mut filenames: Vec<String> = vec![]; // Helper variable to not modify a mutable map
 
     for file in files {
         let path = file.path();
+        let path_str = path.to_string_lossy().to_string();
 
         // Ignore directories
         if path.is_dir() {
@@ -266,77 +207,65 @@ fn get_paired_map(files: &Vec<DirEntry>) -> MultiMap<String, String> {
             continue;
         };
         let base_name = base_name.to_string_lossy().to_string();
-        let extension = extension.to_string_lossy().to_string();
+        let extension = extension.to_string_lossy().to_string().to_lowercase();
 
-        /*if live_photos_map.contains_key(&base_name) {
-            // Duplicate
-            live_photos_map.insert(base_name, true);
-        } else {
-            // Unique (so far)
-            live_photos_map.insert(base_name, false);
-        }*/
-        paired_map.insert(base_name, extension);
+        filenames.push(format!("{base_name}.{extension}"));
+        map.insert(
+            filename,
+            RenameData {
+                path: path_str,
+                timestamp: None,
+                pointer: None,
+                base_name,
+                extension,
+            },
+        );
     }
 
-    //live_photos_map
-    paired_map
+    // Do a second run, checking if a MOV has a corresponding HEIC
+    for (_filename, data) in &mut map {
+        let file_pair = format!("{}.heic", data.base_name);
+
+        if data.extension.to_lowercase() == "mov" && filenames.contains(&file_pair) {
+            data.pointer = Some(file_pair);
+        }
+    }
+
+    map
 }
 
 // Try exif first, otherwise use "exiftool" to read miscellaneous metadata (QuickTime, etc.)
-// Returns a pair of (timestamp, new_name) if successful
-fn get_timestamp_and_rename_pair(
-    path: &String,
-    extension: Option<String>,
-    try_exif_first: bool,
-) -> Option<(String, String)> {
-    if try_exif_first {
-        let timestamp = get_timestamp_from_exif(path);
+// Returns the timestamp if successful
+fn get_timestamp(path: &String) -> Option<String> {
+    // Try EXIF first anyway
+    let timestamp = get_timestamp_from_exif(path);
 
-        match timestamp {
-            Ok(timestamp) => {
-                if let Some(extension) = extension {
-                    return Some((timestamp.clone(), format!("{timestamp}.{extension}")));
-                } else {
-                    return Some((timestamp.clone(), timestamp));
-                }
-            }
-            Err(_error_message) => {
-                //eprintln!("{}", error_message);
-            }
-        }
-    }
+    if let Ok(timestamp) = timestamp {
+        return Some(timestamp);
+    };
 
     // Try CreationDate
     let timestamp = get_timestamp_from_exiftool_creationdate(path);
 
     if let Some(timestamp) = timestamp {
-        if let Some(extension) = extension {
-            return Some((timestamp.clone(), format!("{timestamp}.{extension}")));
-        } else {
-            return Some((timestamp.clone(), timestamp));
-        }
+        return Some(timestamp);
     };
 
     // Try CreateDate with warning in filename
     let timestamp = get_timestamp_from_exiftool_createdate(path);
 
     if let Some(timestamp) = timestamp {
-        if let Some(extension) = extension {
-            return Some((timestamp.clone(), format!("{timestamp} (utc).{extension}",)));
-        } else {
-            return Some((timestamp.clone(), format!("{timestamp} (utc)")));
-        }
+        return Some(format!("{timestamp} (UTC)"));
+    };
+    if let Some(timestamp) = timestamp {
+        return Some(timestamp);
     };
 
     // Try DateCreated
     let timestamp = get_timestamp_from_exiftool_datecreated(path);
 
     if let Some(timestamp) = timestamp {
-        if let Some(extension) = extension {
-            return Some((timestamp.clone(), format!("{timestamp}.{extension}")));
-        } else {
-            return Some((timestamp.clone(), timestamp));
-        }
+        return Some(timestamp);
     };
 
     // Nothing found otherwise

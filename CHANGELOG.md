@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.2.1 - 2025-10-01
+
+### Added
+
+- Better live photos detection, based on the heuristic that the same base filename with different extensions (e.g. `IMG_0369.HEIC` + `IMG_0369.MOV`) are live photo pairs, even if they have different timestamps. The Photos app always shows the HEIC timestamp, not the MOV timestamp.
+
 ## 1.2.0 - 2025-09-30
 
 ### Added
