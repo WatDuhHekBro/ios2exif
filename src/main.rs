@@ -1,11 +1,6 @@
+use multimap::MultiMap;
 use std::{
-    collections::BTreeMap,
-    env,
-    fs::{self, File},
-    io::BufReader,
-    path::PathBuf,
-    process::Command,
-    str,
+    collections::BTreeMap, env, fs::{self, DirEntry, File}, io::BufReader, path::Path, process::Command, str
 };
 
 // General Rules of Thumb:
@@ -29,9 +24,10 @@ enum FileType {
 }
 
 struct FileInfo {
-    path: String,
-    new_name: String,
-    filename_without_extension: String,
+    // timestamp = "2025-01-01_04-20-00"
+    path: String,                       // "/path/to/image.HEIC"
+    new_name: String,                   // "2025-01-01_04-20-00.heic"
+    filename_without_extension: String, // "image"
     file_type: FileType,
 }
 
@@ -49,20 +45,43 @@ fn main() {
             "The current working directory either doesn't exist or isn't accessible."
         );
     };
-    let Ok(files) = fs::read_dir(current_directory) else {
+    let Ok(files) = fs::read_dir(&current_directory) else {
         return eprintln!("The current working directory isn't a valid directory.");
     };
     let mut needs_confirmation = false;
     let mut must_exit = false;
     let mut map = BTreeMap::<String, FileInfo>::new(); // Map<timestamp, path>, used to test for duplicate timestamps.
 
-    for file in files {
-        // Ignore the file if it can't be read
-        let Ok(file) = file else {
-            eprintln!("Warning: A file can't be read.");
-            needs_confirmation = true;
-            continue;
-        };
+    let files = {
+        let mut safe_files: Vec<DirEntry> = Vec::new();
+        for file in files {
+            // Ignore the file if it can't be read
+            let Ok(file) = file else {
+                eprintln!("Warning: A file can't be read.");
+                needs_confirmation = true;
+                continue;
+            };
+
+            safe_files.push(file);
+        }
+        safe_files
+    };
+
+    //let live_photos_map = get_live_photos_map(&files);
+    let paired_map = get_paired_map(&files);
+
+    for (base_name, extensions) in paired_map {
+        if extensions.len() > 1 {
+            //
+        } else if extensions.len() == 1 {
+            //
+        }
+        for ext in extensions {
+            let path = Path::join(&current_directory, &base_name);
+        }
+    }
+
+    for file in &files {
         let path = file.path();
         let path_str = path.to_string_lossy().to_string();
         // Get lowercase extension (if any)
@@ -120,7 +139,7 @@ fn main() {
             FileType::Neither => true,
         };
 
-        let result = get_timestamp_and_rename_pair(&path, &path_str, extension, try_exif_first);
+        let result = get_timestamp_and_rename_pair(&path_str, extension, try_exif_first);
         let Some(result) = result else {
             eprintln!("Warning: Couldn't find any valid EXIF metadata for \"{path_str}\"!");
             needs_confirmation = true;
@@ -216,16 +235,62 @@ fn main() {
     }
 }
 
+// Map<"IMG_0420", true>, keeps track of live photo file pairs.
+// -----
+// Live photos are stored via "IMG_0420.HEIC" + "IMG_0420.MOV" file pairs.
+// The Photos app always shows the timestamp of the HEIC file, but the two timestamps might not always align.
+// Rather than having to manually correct the MOV timestamp for each file, get it right the first time.
+// This is useful because reimporting the files into an app like HashPhotos requires the same filenames with different extensions for live photos to function properly.
+// -----
+// This map will be used in place of iterating over the "files" variable, as it'll already have grouped paired files.
+fn get_paired_map(files: &Vec<DirEntry>) -> MultiMap<String, String> {
+    //fn get_live_photos_map(files: &Vec<DirEntry>) -> BTreeMap<String, bool> {
+    //let mut live_photos_map = BTreeMap::<String, bool>::new();
+    let mut paired_map = MultiMap::<String, String>::new(); // Map<OrigFilename, Extension(s)>
+
+    for file in files {
+        let path = file.path();
+
+        // Ignore directories
+        if path.is_dir() {
+            continue;
+        }
+
+        let filename = file.file_name().to_string_lossy().to_string();
+        let base_name = path.file_stem();
+        let extension = path.extension();
+        let Some(base_name) = base_name else {
+            continue;
+        };
+        let Some(extension) = extension else {
+            continue;
+        };
+        let base_name = base_name.to_string_lossy().to_string();
+        let extension = extension.to_string_lossy().to_string();
+
+        /*if live_photos_map.contains_key(&base_name) {
+            // Duplicate
+            live_photos_map.insert(base_name, true);
+        } else {
+            // Unique (so far)
+            live_photos_map.insert(base_name, false);
+        }*/
+        paired_map.insert(base_name, extension);
+    }
+
+    //live_photos_map
+    paired_map
+}
+
 // Try exif first, otherwise use "exiftool" to read miscellaneous metadata (QuickTime, etc.)
 // Returns a pair of (timestamp, new_name) if successful
 fn get_timestamp_and_rename_pair(
-    path: &PathBuf,
-    path_str: &String,
+    path: &String,
     extension: Option<String>,
     try_exif_first: bool,
 ) -> Option<(String, String)> {
     if try_exif_first {
-        let timestamp = get_timestamp_from_exif(path, path_str);
+        let timestamp = get_timestamp_from_exif(path);
 
         match timestamp {
             Ok(timestamp) => {
@@ -242,7 +307,7 @@ fn get_timestamp_and_rename_pair(
     }
 
     // Try CreationDate
-    let timestamp = get_timestamp_from_exiftool_creationdate(path_str);
+    let timestamp = get_timestamp_from_exiftool_creationdate(path);
 
     if let Some(timestamp) = timestamp {
         if let Some(extension) = extension {
@@ -253,7 +318,7 @@ fn get_timestamp_and_rename_pair(
     };
 
     // Try CreateDate with warning in filename
-    let timestamp = get_timestamp_from_exiftool_createdate(path_str);
+    let timestamp = get_timestamp_from_exiftool_createdate(path);
 
     if let Some(timestamp) = timestamp {
         if let Some(extension) = extension {
@@ -264,7 +329,7 @@ fn get_timestamp_and_rename_pair(
     };
 
     // Try DateCreated
-    let timestamp = get_timestamp_from_exiftool_datecreated(path_str);
+    let timestamp = get_timestamp_from_exiftool_datecreated(path);
 
     if let Some(timestamp) = timestamp {
         if let Some(extension) = extension {
@@ -280,12 +345,9 @@ fn get_timestamp_and_rename_pair(
 
 // Returns a string of the formatted timestamp if successful
 // Ignore the entry if unsuccessful
-fn get_timestamp_from_exif(path: &PathBuf, path_str: &String) -> Result<String, String> {
+fn get_timestamp_from_exif(path: &String) -> Result<String, String> {
     let Ok(file) = File::open(path) else {
-        return Err(format!(
-            "Warning: Failed to open the file: \"{}\"",
-            path_str
-        ));
+        return Err(format!("Warning: Failed to open the file: \"{path}\""));
     };
     let mut bufreader = BufReader::new(&file);
     let exifreader = exif::Reader::new();
@@ -293,8 +355,7 @@ fn get_timestamp_from_exif(path: &PathBuf, path_str: &String) -> Result<String, 
     // Ignore the file if invalid exif
     let Ok(exif) = exifreader.read_from_container(&mut bufreader) else {
         return Err(format!(
-            "Warning: The file doesn't contain valid EXIF: \"{}\"",
-            path_str
+            "Warning: The file doesn't contain valid EXIF: \"{path}\""
         ));
     };
 
@@ -302,7 +363,7 @@ fn get_timestamp_from_exif(path: &PathBuf, path_str: &String) -> Result<String, 
     // Do not use DateTime, as that's supposed to update if the image is modified (https://gitlab.gnome.org/GNOME/gimp/-/issues/8160).
     // Ignore if "ifd_num" isn't "primary", as that indicates that it's a thumbnail image, not a main image.
     let Some(datetime) = exif.get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY) else {
-        return Err(format!("Warning: EXIF metadata is present but does not include DateTimeOriginal for file \"{path_str}\". Not renaming..."));
+        return Err(format!("Warning: EXIF metadata is present but does not include DateTimeOriginal for file \"{path}\". Not renaming..."));
     };
 
     // Convert timestamp of format "YYYY-MM-DD HH:MM:SS" to "YYYY-MM-DD_HH-MM-SS"
@@ -315,18 +376,16 @@ fn get_timestamp_from_exif(path: &PathBuf, path_str: &String) -> Result<String, 
 }
 
 // If it fails for whatever reason, just ignore the entry
-fn get_timestamp_from_exiftool_creationdate(path_str: &String) -> Option<String> {
+fn get_timestamp_from_exiftool_creationdate(path: &String) -> Option<String> {
     // Format: "YYYY:MM:DD HH:MM:SS-ZZ:00"
     let output = Command::new("exiftool")
         .arg("-CreationDate")
         .arg("-s3")
-        .arg(path_str)
+        .arg(path)
         .output();
 
     let Ok(output) = output else {
-        eprintln!(
-            "[exiftool] Warning: Failed to execute \"exiftool\" process on path \"{path_str}\"!"
-        );
+        eprintln!("[exiftool] Warning: Failed to execute \"exiftool\" process on path \"{path}\"!");
         return None;
     };
 
@@ -334,7 +393,7 @@ fn get_timestamp_from_exiftool_creationdate(path_str: &String) -> Option<String>
 
     // Output is empty if metadata attribute doesn't exist
     if length <= 0 {
-        //eprintln!("[exiftool] Warning: No output for tag \"CreationDate\" on path \"{path_str}\"!");
+        //eprintln!("[exiftool] Warning: No output for tag \"CreationDate\" on path \"{path}\"!");
         return None;
     }
 
@@ -345,7 +404,7 @@ fn get_timestamp_from_exiftool_creationdate(path_str: &String) -> Option<String>
 
     let Ok(timestamp) = timestamp else {
         eprintln!(
-            "[exiftool] Warning: CreationDate \"{:?}\" should be a valid UTF-8 string on path \"{path_str}\"!",
+            "[exiftool] Warning: CreationDate \"{:?}\" should be a valid UTF-8 string on path \"{path}\"!",
             slice
         );
         return None;
@@ -360,18 +419,16 @@ fn get_timestamp_from_exiftool_creationdate(path_str: &String) -> Option<String>
 }
 
 // If it fails for whatever reason, just ignore the entry
-fn get_timestamp_from_exiftool_createdate(path_str: &String) -> Option<String> {
+fn get_timestamp_from_exiftool_createdate(path: &String) -> Option<String> {
     // Format: "YYYY:MM:DD HH:MM:SS"
     let output = Command::new("exiftool")
         .arg("-CreateDate")
         .arg("-s3")
-        .arg(path_str)
+        .arg(path)
         .output();
 
     let Ok(output) = output else {
-        eprintln!(
-            "[exiftool] Warning: Failed to execute \"exiftool\" process on path \"{path_str}\"!"
-        );
+        eprintln!("[exiftool] Warning: Failed to execute \"exiftool\" process on path \"{path}\"!");
         return None;
     };
 
@@ -379,7 +436,7 @@ fn get_timestamp_from_exiftool_createdate(path_str: &String) -> Option<String> {
 
     // Output is empty if metadata attribute doesn't exist
     if length <= 0 {
-        //eprintln!("[exiftool] Warning: No output for tag \"CreateDate\" on path \"{path_str}\"!");
+        //eprintln!("[exiftool] Warning: No output for tag \"CreateDate\" on path \"{path}\"!");
         return None;
     }
 
@@ -389,7 +446,7 @@ fn get_timestamp_from_exiftool_createdate(path_str: &String) -> Option<String> {
 
     let Ok(timestamp) = timestamp else {
         eprintln!(
-            "[exiftool] Warning: CreateDate \"{:?}\" should be a valid UTF-8 string on path \"{path_str}\"!",
+            "[exiftool] Warning: CreateDate \"{:?}\" should be a valid UTF-8 string on path \"{path}\"!",
             slice
         );
         return None;
@@ -404,18 +461,16 @@ fn get_timestamp_from_exiftool_createdate(path_str: &String) -> Option<String> {
 }
 
 // If it fails for whatever reason, just ignore the entry
-fn get_timestamp_from_exiftool_datecreated(path_str: &String) -> Option<String> {
+fn get_timestamp_from_exiftool_datecreated(path: &String) -> Option<String> {
     // Format: "YYYY:MM:DD HH:MM:SS"
     let output = Command::new("exiftool")
         .arg("-DateCreated")
         .arg("-s3")
-        .arg(path_str)
+        .arg(path)
         .output();
 
     let Ok(output) = output else {
-        eprintln!(
-            "[exiftool] Warning: Failed to execute \"exiftool\" process on path \"{path_str}\"!"
-        );
+        eprintln!("[exiftool] Warning: Failed to execute \"exiftool\" process on path \"{path}\"!");
         return None;
     };
 
@@ -423,7 +478,7 @@ fn get_timestamp_from_exiftool_datecreated(path_str: &String) -> Option<String> 
 
     // Output is empty if metadata attribute doesn't exist
     if length <= 0 {
-        //eprintln!("[exiftool] Warning: No output for tag \"DateCreated\" on path \"{path_str}\"!");
+        //eprintln!("[exiftool] Warning: No output for tag \"DateCreated\" on path \"{path}\"!");
         return None;
     }
 
@@ -433,7 +488,7 @@ fn get_timestamp_from_exiftool_datecreated(path_str: &String) -> Option<String> 
 
     let Ok(timestamp) = timestamp else {
         eprintln!(
-            "[exiftool] Warning: DateCreated \"{:?}\" should be a valid UTF-8 string on path \"{path_str}\"!",
+            "[exiftool] Warning: DateCreated \"{:?}\" should be a valid UTF-8 string on path \"{path}\"!",
             slice
         );
         return None;

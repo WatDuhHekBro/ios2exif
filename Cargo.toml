@@ -5,4 +5,5 @@ edition = "2021"
 
 [dependencies]
 kamadak-exif = "0.6.1"
+multimap = "0.10.1"
 text_io = "0.1.13"
